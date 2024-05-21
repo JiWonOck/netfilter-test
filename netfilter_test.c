@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <netinet/in.h>
 #include <linux/types.h>
@@ -8,19 +9,12 @@
 
 #include <libnetfilter_queue/libnetfilter_queue.h>
 
-// void dump(unsigned char* buf, int size) {
-// 	int i;
-// 	for (i = 0; i < size; i++) {
-// 		if (i != 0 && i % 16 == 0)
-// 			printf("\n");
-// 		printf("%02X ", buf[i]);
-// 	}
-// 	printf("\n");
-// }
-
+// allow 변수는 패킷 허용 여부
+// host 변수는 검사할 호스트를 저장
 int allow = 0;
 char host[40];
 
+// IP_Header, TCP_Header, HTTP_Header 구조체는 각각 IP, TCP, HTTP 헤더를 정의합니다.
 typedef struct libnet_ip_hdr{
     u_int8_t length:4, version:4;
     u_int8_t typeOfSource;
@@ -52,32 +46,38 @@ typedef struct http_request{
     char host[40];
 }HTTP_Header;
 
+// 패킷의 IP 버전을 확인하고, IP 헤더의 길이를 반환
+// IPv4인 경우 헤더 길이를 반환하고, 그렇지 않으면 -1을 반환
 int chk_IP_version(const u_char* packet){
     IP_Header *Header;
     Header = (IP_Header*)packet;
     if(Header->version == 4){
-        printf("iplength : %d\n",Header->length);
-        return Header->length;
+        printf("iplength : %d\n",Header->length*4);
+        return Header->length*4;
     }
     else
         return -1;
 }
 
+// TCP 헤더의 길이를 반환
 int ret_TCP_length(const u_char* packet){
     TCP_Header *Header;
     Header = (TCP_Header*)packet;
-    printf("tcplength: %d\n", Header->length);
-    return Header->length;
+    printf("%d \n", ntohs(Header->dstPort));
+    printf("tcplength: %d\n", Header->length*4);
+    return Header->length*4;
 }
 
+// HTTP 요청에서 호스트를 검사하여, 전역 변수 host와 일치하는 경우 allow 변수를 1로 설정
 void chk_Host(const u_char* packet){
     HTTP_Header *Header;
     Header = (HTTP_Header*)packet;
+    fprintf(stderr, "%s \n", Header);
     if(strncmp(Header->host,host,(int)strlen(host))==0){
+        fprintf(stderr, "blocked %s\n", host);
         allow = 1;
     }
 }
-
 
 /* returns packet id */
 static u_int32_t print_pkt (struct nfq_data *tb)
@@ -125,6 +125,9 @@ static u_int32_t print_pkt (struct nfq_data *tb)
 	if (ifi)
 		printf("physoutdev=%u ", ifi);
 
+    // nfq_get_payload(tb, &data)로 페이로드 데이터를 가져와 길이를 출력
+    // IP 버전을 체크하고, IP 헤더의 길이를 고려하여 데이터를 이동
+    // TCP 헤더의 길이를 가져와 데이터를 다시 이동한 뒤, 호스트를 검사
 	ret = nfq_get_payload(tb, &data);
 	if (ret >= 0){
         allow = 0;
@@ -132,7 +135,7 @@ static u_int32_t print_pkt (struct nfq_data *tb)
         //dump(data, ret);
         int ip_len = chk_IP_version(data);
         if (ip_len != -1){
-            ip_len = ip_len*4;
+            ip_len = ip_len;
             data+=ip_len;
             int tcp_len = ret_TCP_length(data);
             data += tcp_len;
@@ -151,7 +154,7 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 {
 	u_int32_t id = print_pkt(nfa);
 	printf("entering callback\n");
-	return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    return nfq_set_verdict(qh, id, allow == 1 ? NF_DROP : NF_ACCEPT, 0, NULL);
 }
 
 int main(int argc, char **argv)
@@ -162,6 +165,8 @@ int main(int argc, char **argv)
 	int fd;
 	int rv;
 	char buf[4096] __attribute__ ((aligned));
+    strcpy(host, argv[1]);
+    fprintf(stderr, "%s \n", host);
 
 	printf("opening library handle\n");
 	h = nfq_open();
